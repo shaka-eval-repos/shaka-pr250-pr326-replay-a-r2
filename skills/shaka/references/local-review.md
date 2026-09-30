@@ -233,11 +233,11 @@ earlier round used: the outcome follows each id's latest disposition, so reusing
 different problem can hide an unfixed defect. `model`, `tokens`, `cost`, and
 `estimate` are optional, as described below, and a top-level `fallback` sets the fallback notice.
 
-`review run` refuses the next round until the last round's findings are recorded. It also
-refuses a head the ledger already reviewed, a head that lacks the last reviewed head or any
+`review run` refuses a new head until every review in the previous batch has dispositions. It also
+refuses a repeated reviewer/head pair or a return to an earlier batch, a head that lacks the last reviewed head or any
 recorded fix commit, a fix recorded as the head it was found in, and a different `--base`;
-after a rebase, start a new ledger. Publishing refuses a last round that records a fix, because
-no later round has reviewed it. The next round's prompt
+after a rebase, start a new ledger. Publishing refuses fixes in any review of the latest batch, because
+no later head has reviewed them. The next round's prompt
 lists, as review data, every earlier finding's id, class, summary, and latest disposition
 (`fixed in SHA`, `documented nit`, `documented risk`), plus the commits since the last
 reviewed head. It asks the reviewer to confirm each fix and to review the full diff fresh.
@@ -250,13 +250,58 @@ then publish right away:
 shaka review publish OWNER/REPO NUMBER --content-file "$LEDGER"
 ```
 
+## Review one head with several reviewers
+
+Select the batch from trusted settings, optionally overriding its size for this change:
+
+```bash
+shaka reviewer --root . --ref "$TRUSTED" --implementer openai/codex --count 2
+```
+
+Use the returned `reviewers` identities. Keep `BASE`, `HEAD`, `TRUSTED` and `LEDGER`
+identical for every invocation. Launch the appropriate commands above in separate
+terminals to run concurrently, or run them sequentially. Each result returns its
+own stable `round` number in completion order. Selection order and completion order
+can differ. Wait for every selected process before making fixes or moving HEAD.
+Selection is not a scheduler: the ledger does not know how many processes you intend
+to launch and cannot detect an omitted reviewer.
+
+Record each report's dispositions by its returned round number:
+
+```bash
+shaka review record --ledger "$LEDGER" --round 1 --content-file FIRST_FINDINGS.json
+shaka review record --ledger "$LEDGER" --round 2 --content-file SECOND_FINDINGS.json
+```
+
+Batches with several completed reviews require `--round`; a single-reviewer loop
+still records the last round without it. The content can include `head` and `reviewer`
+to reject a stale target. Finding ids belong to their reviewer: two peers can both
+use `F1`, and neither overwrites the other's disposition. Reuse an id only for that
+reviewer's same finding on a later head.
+
+All reviewers receive earlier-head findings without author notes. They never
+receive a peer's current-head findings, even when that peer finishes first. A new
+head needs dispositions from every completed review and must contain the prior
+head and every recorded fix from its batch.
+
+Ledger mutations reload under an exclusive sidecar lock and replace the JSON
+atomically. Keep the ledger, its `.lock` file and all reports together outside the
+checkout on a local filesystem that supports file locks and atomic renames. Do not
+remove the lock during a review. Duplicate reviewer/head results, replaced ledgers,
+late results after the batch advances, and a moved checkout HEAD are refused without
+overwriting valid peer evidence. A failed CLI adds no completed round; retain its
+failure result and follow the existing availability procedure. There is no automatic
+retry or crash recovery queue. Publish only after all findings have dispositions
+and any fixed findings have been reviewed at a later head.
+
 ## Publish content
 
 The ledger is the content file. Without one, the content JSON lists `rounds`. Copy each
 round's `head`, `reviewer`, `report`, `prompt_source`, and `criteria_ref` from its
 `shaka review run` result, and add its `findings` in the shape above. Publishing refuses a
 round whose findings do not match its report's `FINDINGS n`, so every finding has a disposition.
-It also refuses two rounds of one commit and a fix recorded in the commit its round reviewed. A
+It also refuses a repeated reviewer/head pair, an earlier batch reopened after a later head,
+and a fix recorded in the commit its round reviewed. A
 content file without a ledger gets only these checks: publishing does not read Git history, so
 use `--ledger` when fixes must be proven to follow and reach the reviewed head.
 Add `model`, `tokens`, and `cost` from native usage; a missing value renders `UNKNOWN`. Leave

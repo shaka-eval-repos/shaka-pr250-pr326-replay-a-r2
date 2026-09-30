@@ -373,3 +373,50 @@ class LocalReviewSummaryTest < Minitest::Test
     assert_includes body, '**Prompt:** `Shaka default` is Shaka\'s [review instructions]'
   end
 end
+
+# Batch publication must keep every peer's findings and disposition visible.
+class LocalReviewBatchCommentTest < Minitest::Test
+  include LocalReviewCommentFixture
+
+  def test_publishes_same_head_peers_and_keeps_earlier_evidence
+    earlier = round(EARLIER)
+    peer = round(reviewer: 'anthropic/claude', report: report(reviewer: 'anthropic/claude'), findings: [NIT])
+    clean = round(report: report(findings: 0), findings: [])
+    body = render('rounds' => [earlier, peer, clean])
+
+    assert_equal 3, body.scan('<details>').size
+    assert_includes body, '| 2 | `aaaaaaa` | anthropic/claude |'
+    assert_includes body, "latest batch's findings are documented nits or risks (1 nit)"
+    assert_equal 2, body.scan('— documented nit').size
+    assert body.end_with?("REVIEWED #{HEAD} BY openai/codex EFFORT UNKNOWN FINDINGS 0\n")
+  end
+
+  def test_clean_peer_does_not_hide_a_defect_or_a_fix_in_the_latest_batch
+    defect = { 'id' => 'F1', 'summary' => 'Broken behavior', 'class' => 'defect', 'disposition' => 'documented' }
+    peer = round(reviewer: 'anthropic/claude', report: report(reviewer: 'anthropic/claude'), findings: [defect])
+    clean = round(report: report(findings: 0), findings: [])
+    assert_includes render('rounds' => [peer, clean]), '1 unfixed defect'
+    peer['findings'] = [defect.merge('disposition' => 'fixed', 'commit' => 'd' * 40)]
+    error = assert_raises(Shaka::Error) { render('rounds' => [peer, clean]) }
+    assert_includes error.message, 'no later round reviewed'
+  end
+
+  def test_peer_ids_cannot_erase_one_anothers_defects
+    defect = { 'id' => 'F1', 'summary' => 'Broken behavior', 'class' => 'defect', 'disposition' => 'documented' }
+    fixed = defect.merge('disposition' => 'fixed', 'commit' => HEAD)
+    first = round(EARLIER, findings: [defect])
+    peer = round(EARLIER, reviewer: 'anthropic/claude',
+                          report: report(EARLIER, reviewer: 'anthropic/claude'), findings: [fixed])
+    clean = round(report: report(findings: 0), findings: [])
+    assert_includes render('rounds' => [first, peer, clean]), '1 unfixed defect'
+  end
+
+  def test_rejects_incomplete_peers_duplicate_identities_and_reopened_batches
+    peer = round(reviewer: 'anthropic/claude', report: report(reviewer: 'anthropic/claude'), findings: [])
+    assert_raises(Shaka::Error) { render('rounds' => [round, peer]) }
+    assert_raises(Shaka::Error) { render('rounds' => [round, round(reviewer: 'OpenAI/Codex')]) }
+    peer['findings'] = [NIT]
+    error = assert_raises(Shaka::Error) { render('rounds' => [round, round(EARLIER), peer]) }
+    assert_includes error.message, 'earlier-head batch reappears'
+  end
+end

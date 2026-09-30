@@ -233,6 +233,36 @@ Configured CI review jobs have separate waiting rules under
 [`review.ci_review_wait`](#reviewci_review_wait).
 See [reviewer selection](../skills/shaka/references/review.md#choose-a-local-reviewer).
 
+## `review.local_review_count`
+
+**Optional; default: `1`.** Ask several available reviewers to examine the same
+committed change. For example, this setting selects up to two distinct reviewers
+from your existing [reviewer preferences](#reviewlocal_review_agents):
+
+```yaml
+review:
+  required: none
+  local_review_count: 2
+```
+
+The first reviewer still prefers a provider that did not implement the change.
+Additional reviewers follow the configured order, skipping unavailable identities
+and duplicates. If fewer reviewers are available, selection returns fewer; the
+fresh implementation-model fallback remains available when every listed CLI fails.
+Only positive integers are accepted.
+
+Several reviewers can finish concurrently without overwriting one another's
+reports. Each sees earlier-head findings, with current-head peer findings excluded.
+Wait for all selected reviewers and record every finding before changing the head.
+See the [batch review procedure](../skills/shaka/references/local-review.md#review-one-head-with-several-reviewers)
+for invocation and recording.
+
+Each additional reviewer adds a review call, provider usage and dispositions to
+read. Concurrent calls may reduce waiting, but measured delivery benefit and usage
+frequency are unknown. Keep the default for ordinary changes; increase it when
+another independent perspective is worth that cost. This setting selects local
+reviewers; it leaves CI review requirements and merge authority unchanged.
+
 ### Add a second reviewer
 
 A review from the provider that wrote the change shares its blind spots. When the

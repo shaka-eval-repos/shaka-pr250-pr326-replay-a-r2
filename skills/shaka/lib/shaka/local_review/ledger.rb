@@ -4,12 +4,15 @@ require 'json'
 require_relative '../error'
 require_relative 'evidence'
 require_relative 'finding'
+require_relative 'recording'
 
 module Shaka
   # Private record of a local review loop: each round's commit, reviewer settings, report, and
   # what became of its findings. It stays outside the checkout until `review publish` renders it,
   # and it has the same shape as that command's content file.
   class LocalReviewLedger
+    include LocalReviewRecording
+
     attr_reader :path
 
     # Only `review run` can start a ledger, so only it needs the checkout to keep the ledger out of.
@@ -22,45 +25,51 @@ module Shaka
 
     def rounds = data.fetch('rounds')
 
-    def last_round_fixes
-      LocalReviewFinding.list(rounds.last['findings'], "round #{rounds.size} finding").select(&:fixed?).map(&:commit)
-    end
-
     def last_head = rounds.last&.fetch('head')
 
-    # A round reviews a new commit on the same base, after the previous round's findings are recorded.
-    def check_next!(base:, head:)
+    # Current-head peers never enter the history or the prompt seen by another reviewer.
+    def previous_batch(head)
+      earlier = rounds.reject { |round| round['head'] == head }
+      earlier.select { |round| round['head'] == earlier.last&.fetch('head') }
+    end
+
+    def check_next!(base:, head:, reviewer:)
       return if rounds.empty?
 
       raise Error, "The ledger's rounds measure the change against #{data['base']}; use a new ledger." unless
         data['base'] == base
 
-      check_new_head!(head)
-      return if recorded?(rounds.last)
+      check_new_review!(head, reviewer)
+      return if head == last_head
 
-      raise Error, "Record round #{rounds.size}'s findings with `shaka review record` before the next round."
+      rounds.each_with_index do |round, index|
+        next if recorded?(round)
+
+        raise Error, "Record round #{index + 1}'s findings with `shaka review record` before the next round."
+      end
     end
 
-    # The newest disposition of every finding so far, keyed by the id rounds share.
-    def prior_findings
-      rounds.each_with_index.with_object({}) do |(round, index), latest|
+    # Finding ids belong to their reviewer, so one peer cannot erase another peer's evidence.
+    def prior_findings(head:)
+      rounds.reject { |round| round['head'] == head }.each_with_index.with_object({}) do |(round, index), latest|
         LocalReviewFinding.list(round['findings'], "round #{index + 1} finding").each do |finding|
-          latest[finding.id] = finding
+          latest[[round['reviewer'].downcase, finding.id]] = finding
         end
       end.values
     end
 
+    # Re-read under a stable sidecar lock: renaming the ledger cannot invalidate the lock.
+    # A late peer can append only while its head is still the latest batch.
     def append!(base:, round:)
-      write(data.merge('base' => base, 'rounds' => rounds + [round]))
-    end
+      snapshot = review_keys(rounds)
+      update do
+        check_snapshot!(snapshot)
 
-    # Sets the last round's findings and any usage the host reported for it.
-    def record!(content)
-      raise Error, 'Record content must be an object.' unless content.is_a?(Hash)
-
-      round = last_round.merge(content.slice('findings', 'model', 'tokens', 'cost', 'estimate'))
-      check_findings!(round, rounds.size)
-      write(data.merge(content.slice('fallback'), 'rounds' => rounds[0...-1] + [round]))
+        check_next!(base:, head: round.fetch('head'), reviewer: round.fetch('reviewer'))
+        yield if block_given?
+        write(data.merge('base' => base, 'rounds' => rounds + [round]))
+        rounds.size
+      end
     end
 
     private
@@ -77,23 +86,30 @@ module Shaka
                 end
     end
 
-    def last_round = rounds.last || raise(Error, 'The ledger has no round to record.')
-
-    def check_new_head!(head)
-      reviewed = rounds.index { |round| round['head'] == head }
+    def check_new_review!(head, reviewer)
+      reviewed = rounds.index do |round|
+        round['head'] == head && (head != last_head || round['reviewer'].casecmp?(reviewer))
+      end
       raise Error, "Round #{reviewed + 1} already reviewed #{head}; commit the fix first." if reviewed
     end
 
-    def recorded?(round) = round.key?('findings') || reported_count(round).zero?
+    def review_keys(items) = items.map { |entry| entry.values_at('head', 'reviewer', 'report') }
 
-    # The count check keeps a finding from dropping out between the report and the comment.
-    def check_findings!(round, number)
-      findings = LocalReviewFinding.list(round['findings'], "round #{number} finding")
-      reported = reported_count(round)
-      return if findings.size == reported
+    def check_snapshot!(snapshot)
+      return if review_keys(rounds.first(snapshot.size)) == snapshot
 
-      raise Error, "Round #{number}'s report counts #{reported} findings; #{findings.size} were recorded."
+      raise Error, 'The review ledger changed or was replaced while the reviewer ran.'
     end
+
+    def update
+      File.open("#{@path}.lock", File::RDWR | File::CREAT, 0o600) do |lock|
+        lock.flock(File::LOCK_EX)
+        @data = nil
+        yield
+      end
+    end
+
+    def recorded?(round) = round.key?('findings') || reported_count(round).zero?
 
     def reported_count(round)
       match = File.read(round.fetch('report'), encoding: 'UTF-8').match(LocalReviewEvidence::CLOSING)
@@ -107,6 +123,8 @@ module Shaka
       File.write(temporary, "#{JSON.pretty_generate(content)}\n", perm: 0o600)
       File.rename(temporary, @path)
       @data = content
+    ensure
+      File.unlink(temporary) if temporary && File.exist?(temporary)
     end
   end
 end

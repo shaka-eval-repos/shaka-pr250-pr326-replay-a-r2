@@ -66,12 +66,20 @@ module Shaka
     end
 
     def check_order!(rounds)
-      raise Error, 'Two rounds review the same commit; each round reviews a new head.' unless
-        rounds.map(&:head).uniq.size == rounds.size
+      check_batch_order!(rounds)
+      latest = rounds.select { |round| round.head == rounds.last.head }
       raise Error, "Round #{rounds.size} records fixes no later round reviewed; review the fix head first." if
-        rounds.last.findings.any?(&:fixed?)
+        latest.any? { |round| round.findings.any?(&:fixed?) }
 
       rounds.each(&:check_fixes_follow!)
+    end
+
+    def check_batch_order!(rounds)
+      identities = rounds.map { |round| [round.head, round.reviewer] }
+      raise Error, 'Two rounds review the same commit with the same reviewer.' unless identities.uniq == identities
+
+      heads = rounds.chunk(&:head).map(&:first)
+      raise Error, 'An earlier-head batch reappears after a later head.' unless heads.uniq == heads
     end
 
     # A fence opened in one report and closed in the next hides the boundary between them, including
@@ -89,7 +97,9 @@ module Shaka
       fixed = {}
       @rounds.map do |round|
         text = round.details(@links, fixed)
-        round.findings.select(&:fixed?).each { |finding| fixed[finding.id] = finding.commit }
+        round.findings.select(&:fixed?).each do |finding|
+          fixed[[round.reviewer, finding.id]] = [round.head, finding.commit]
+        end
         text
       end
     end
@@ -134,7 +144,7 @@ module Shaka
 
     # One reviewed commit, its reviewer settings, and the report whose attestation it carries.
     class Round
-      attr_reader :head, :findings
+      attr_reader :head, :findings, :reviewer
 
       def initialize(spec, number)
         raise Error, "Local review round #{number} must be an object." unless spec.is_a?(Hash)
@@ -210,10 +220,16 @@ module Shaka
           result = finding.fixed? ? "fixed in #{links.commit(finding.commit)}" : finding.label
           line = "- `#{finding.id}` #{finding.kind}: #{finding.summary} — #{result}"
           line += " — #{finding.note}" if finding.note
-          returned = fixed_before[finding.id]
-          returned ? "#{line} · **returned after its fix in #{links.commit(returned)}**" : line
+          line + returned_notice(finding, links, fixed_before)
         end
         "**Dispositions**\n\n#{lines.join("\n")}\n\n"
+      end
+
+      def returned_notice(finding, links, fixed_before)
+        earlier_head, returned = fixed_before[[@reviewer, finding.id]]
+        return '' unless returned && earlier_head != @head
+
+        " · **returned after its fix in #{links.commit(returned)}**"
       end
 
       def prompt(links)
