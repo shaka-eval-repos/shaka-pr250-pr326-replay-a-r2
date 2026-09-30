@@ -115,19 +115,28 @@ module Shaka
       return unless @options[:ledger]
 
       @ledger = LocalReviewLedger.new(@options[:ledger], root:)
-      @ledger.check_next!(base: @options[:base], head:)
-      check_history! if @ledger.last_head
+      @ledger.check_next!(base: @options[:base], head:, reviewer:)
+      check_history!
     end
 
-    # The next round must hold the last reviewed head and each fix the last round records, and each
-    # fix must come after the head it was found in, or the comment would call a finding fixed in a
-    # commit that is missing or predates it. Earlier rounds' fixes are already inside the last head.
+    # Every fix in the previous batch must follow that head and reach this one.
+    # Current-head peers' fixes wait for the next head; a peer has not reviewed them yet.
     def check_history!
-      last = @ledger.last_head
+      previous = @ledger.previous_batch(head)
+      return if previous.empty?
+
+      last = previous.last.fetch('head')
       contains!(last, head)
-      @ledger.last_round_fixes.each do |fix|
-        raise Shaka::Error, "Fix #{fix} is the head round #{@ledger.rounds.size} reviewed; commit the fix." if
-          fix == last
+      previous.each { |round| check_fixes!(round, last) }
+    end
+
+    def check_fixes!(round, last)
+      LocalReviewFinding.list(round['findings'], 'previous batch finding').select(&:fixed?).each do |finding|
+        fix = finding.commit
+        if fix == last
+          raise Shaka::Error,
+                "Fix #{fix} is the head round #{@ledger.rounds.index(round) + 1} reviewed; commit the fix."
+        end
 
         contains!(last, fix)
         contains!(fix, head)
@@ -147,25 +156,42 @@ module Shaka
     def record_round(result)
       return result unless @ledger && result['status'] == 'completed'
 
-      round = result.slice('head', 'reviewer', 'report', 'prompt_source', 'criteria_ref', 'usage')
-      # The routed model comes from native usage through `review record`, never from the request.
-      round = round.merge('effort' => effort, 'requested_model' => @options[:model]).compact
-      @ledger.append!(base: @options[:base], round:)
-      result.merge('ledger' => @ledger.path, 'round' => @ledger.rounds.size)
+      round = ledger_round(result)
+      number = @ledger.append!(base: @options[:base], round:) do
+        validate_checkout!
+        check_history!
+      end
+      result.merge('ledger' => @ledger.path, 'round' => number)
+    rescue Shaka::Error, SystemCallError, JSON::ParserError
+      discard_report(result)
+      raise
+    end
+
+    # The routed model comes from native usage through `review record`, never from the request.
+    def ledger_round(result)
+      result.slice('head', 'reviewer', 'report', 'prompt_source', 'criteria_ref', 'usage')
+            .merge('effort' => effort, 'requested_model' => @options[:model]).compact
+    end
+
+    def discard_report(result)
+      path = result['report']
+      File.unlink(path) if path && File.exist?(path)
     end
 
     # Earlier rounds reach the reviewer as data: each finding's class and disposition, never the
     # author's note, so the reviewer checks the fixes without anchoring on the author's reasons.
     def prior_rounds(marker)
-      return '' unless @ledger&.rounds&.any?
+      previous = @ledger ? @ledger.previous_batch(head) : []
+      last = previous.last&.fetch('head')
+      return '' unless last
 
-      findings = @ledger.prior_findings.map(&:prompt_line)
-      commits = capture(git_executable, '-C', root, 'log', '--format=%h %s', "#{@ledger.last_head}..#{head}", '--')
+      findings = @ledger.prior_findings(head:).map(&:prompt_line)
+      commits = capture(git_executable, '-C', root, 'log', '--format=%h %s', "#{last}..#{head}", '--')
       'PRIOR ROUNDS: Earlier local rounds reviewed this change. Confirm each fix below resolves its finding, ' \
         'and report it again with the same id if not. Do not raise documented findings again unless the ' \
         "change made them worse. Then review the full diff fresh.\n\n--- BEGIN PRIOR ROUND DATA #{marker} ---\n" \
         "Findings:\n#{findings.empty? ? 'none' : findings.join("\n")}\n\n" \
-        "Commits since #{@ledger.last_head}:\n#{commits}--- END PRIOR ROUND DATA #{marker} ---\n\n"
+        "Commits since #{last}:\n#{commits}--- END PRIOR ROUND DATA #{marker} ---\n\n"
     end
   end
 
@@ -187,7 +213,7 @@ module Shaka
       validate_tempdir!
       open_ledger
       with_requested_model(record_round(run_report(review_prompt)))
-    rescue Shaka::Error, SystemCallError => e
+    rescue Shaka::Error, SystemCallError, JSON::ParserError => e
       with_requested_model(setup_failure(e))
     end
 

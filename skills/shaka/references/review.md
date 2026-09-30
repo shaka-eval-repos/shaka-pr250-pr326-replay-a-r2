@@ -95,7 +95,7 @@ for the selected identity and record which CLI or fresh coding-agent session ran
 
 ```text
 shaka reviewer [--root DIR] [--ref REF] --implementer PROVIDER/FAMILY [--implementer ...]
-                                        [--unavailable PROVIDER/FAMILY ...]
+                                        [--unavailable PROVIDER/FAMILY ...] [--count N]
 ```
 
 Pass `--implementer` once per provider and model family that produced part of the change, counting
@@ -107,6 +107,15 @@ documented CLI is missing from `PATH`, or that the documented reviewer command r
 flags and itself reported a failure such as missing credentials, exhausted quota, or a provider
 outage. Added or removed flags do not establish unavailability. A helper-side setup or evidence-write
 failure does not qualify, even when `attempted` is true; neither does a current-host Task or subagent.
+
+Selection returns an ordered `reviewers` list. Its first identity is also returned
+as `reviewer`, with the existing `outcome` and `note`. The optional positive-integer
+`--count N` overrides [review.local_review_count](https://github.com/shakacode/shaka/blob/main/docs/settings.md#reviewlocal_review_count),
+which defaults to one. The first choice preserves provider preference and fallback;
+additional available identities follow configured order, compared without case.
+The list may be shorter than requested. Selection does not launch processes or
+require a larger batch for merging. Run every selected identity against one head
+using the [batch procedure](local-review.md#review-one-head-with-several-reviewers).
 
 Three outcomes, none of them an error:
 

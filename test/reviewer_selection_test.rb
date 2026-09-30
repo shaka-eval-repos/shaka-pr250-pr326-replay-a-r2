@@ -10,9 +10,9 @@ class ReviewerSelectionTest < Minitest::Test
             { 'provider' => 'openai', 'model_family' => 'codex' },
             { 'provider' => 'xai', 'model_family' => 'grok' }].freeze
 
-  def select(implementers, unavailable: [], reviewers: ROSTER)
+  def select(implementers, unavailable: [], reviewers: ROSTER, count: 1)
     Shaka::ReviewerSelection.new(
-      reviewers:,
+      reviewers:, count:,
       implementers: implementers.map { |text| Shaka::ReviewerSelection.parse(text) },
       unavailable: unavailable.map { |text| Shaka::ReviewerSelection.parse(text) }
     ).call
@@ -106,6 +106,30 @@ class ReviewerSelectionTest < Minitest::Test
 
     assert_equal 'same_model', result.fetch('outcome')
     assert_equal 'openai/codex', result.fetch('reviewer')
+  end
+
+  def test_keeps_first_preference_then_fills_in_configured_order
+    result = select(['anthropic/claude'], count: 3)
+
+    assert_equal %w[openai/codex anthropic/claude xai/grok], result.fetch('reviewers')
+    assert_equal result.fetch('reviewer'), result.fetch('reviewers').first
+    assert_equal select(['anthropic/claude']).fetch('note'), result.fetch('note')
+  end
+
+  def test_returns_only_available_unique_identities_even_when_count_is_larger
+    roster = ROSTER + [{ 'provider' => 'OpenAI', 'model_family' => 'Codex' }]
+    result = select(['anthropic/claude'], count: 9, reviewers: roster, unavailable: ['XAI/Grok'])
+
+    assert_equal %w[openai/codex anthropic/claude], result.fetch('reviewers')
+    fallback = select(['openai/codex'], count: 3, unavailable: %w[openai/codex anthropic/claude xai/grok])
+    assert_equal ['openai/codex'], fallback.fetch('reviewers')
+    assert_equal 'same_model', fallback.fetch('outcome')
+  end
+
+  def test_rejects_invalid_counts
+    [0, -1, 1.5, '2', nil, true].each do |count|
+      assert_raises(Shaka::Error) { select(['openai/codex'], count:) }
+    end
   end
 
   def test_requires_at_least_one_implementer

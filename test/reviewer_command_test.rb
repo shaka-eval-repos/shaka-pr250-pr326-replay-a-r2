@@ -56,7 +56,7 @@ class ReviewerCommandTest < Minitest::Test
 
   def test_requires_at_least_one_implementer
     with_repository do |root|
-      _, error, status = Open3.capture3(COMMAND, 'reviewer', '--root', root)
+      _, error, status = Open3.capture3(self.class::COMMAND, 'reviewer', '--root', root)
 
       refute_predicate status, :success?
       assert_includes error, '--implementer is required'
@@ -65,24 +65,27 @@ class ReviewerCommandTest < Minitest::Test
 
   def test_rejects_an_identity_without_a_model_family
     with_repository do |root|
-      _, error, status = Open3.capture3(COMMAND, 'reviewer', '--root', root,
+      _, error, status = Open3.capture3(self.class::COMMAND, 'reviewer', '--root', root,
                                         '--implementer', 'anthropic')
 
       refute_predicate status, :success?
       assert_includes error, 'PROVIDER/MODEL_FAMILY'
     end
   end
+end
 
+# Shared repository setup for single and batch selection commands.
+module ReviewerCommandFixture
   private
 
   def assert_reviewer_rejects(root, expected)
-    _, error, status = Open3.capture3(COMMAND, 'reviewer', '--root', root, '--ref', 'HEAD',
+    _, error, status = Open3.capture3(self.class::COMMAND, 'reviewer', '--root', root, '--ref', 'HEAD',
                                       '--implementer', 'anthropic/claude')
     assert_includes error, expected, "expected reviewer failure, got status #{status.exitstatus}"
   end
 
   def reviewer(root, *)
-    output, error, status = Open3.capture3(COMMAND, 'reviewer', '--root', root, *)
+    output, error, status = Open3.capture3(self.class::COMMAND, 'reviewer', '--root', root, *)
     raise error unless status.success?
 
     JSON.parse(output)
@@ -130,3 +133,5 @@ class ReviewerCommandTest < Minitest::Test
     raise output unless status.success?
   end
 end
+
+ReviewerCommandTest.include(ReviewerCommandFixture)
